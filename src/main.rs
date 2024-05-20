@@ -1,9 +1,13 @@
 use std::{
-    collections::HashMap, fs::File, io::Write, os::unix::process::CommandExt, path::{Path, PathBuf}
+    collections::HashMap,
+    fs::File,
+    io::Write,
+    os::unix::process::CommandExt,
+    path::{Path, PathBuf},
 };
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use clap::{error, Parser};
+use clap::Parser;
 use eyre::ContextCompat;
 
 const EXTENSION: &str = "cryptenv";
@@ -11,6 +15,14 @@ const VERSION: &str = "envup-1-0";
 
 #[derive(Debug, Parser)]
 struct Options {
+    /// Print the content of the files
+    #[clap(short, long)]
+    print: bool,
+
+    /// Dry-Run, do not spawn a shell or write the encrypted file
+    #[clap(short('n'), long)]
+    dry_run: bool,
+
     /// path to the env file
     path: PathBuf,
 }
@@ -62,17 +74,29 @@ fn parse_env(s: &str) -> Result<HashMap<String, String>, eyre::Error> {
 
 fn en(opts: Options, password: String) -> eyre::Result<()> {
     let content = encrypt(&opts.path, &password)?;
-    eprintln!("output: {content}");
+    if opts.print {
+        println!("{content}");
+    }
+    if !opts.dry_run {
+        return Ok(());
+    }
+
     let mut output_file = File::create(opts.path.with_extension(EXTENSION))?;
     output_file.write_all(content.as_bytes())?;
+
     Ok(())
 }
 
 fn de(opts: Options, password: String) -> eyre::Result<()> {
     let content = decrypt(&opts.path, &password)?;
-    println!("output: {content}");
+    if opts.print {
+        println!("{content}");
+    }
+    if opts.dry_run {
+        return Ok(());
+    }
+    
     let map = parse_env(&content)?;
-    eprintln!("{map:?}");
 
     let shell = std::env::var("SHELL").expect("No SHELL variable in environment!");
     let mut cmd = std::process::Command::new(shell);
@@ -80,11 +104,9 @@ fn de(opts: Options, password: String) -> eyre::Result<()> {
         cmd.env(k, v);
     }
     eprintln!("Starting shell with new variables.");
-    
+
     let error = cmd.exec();
     panic!("{error}");
-
-    // Ok(())
 }
 
 fn main() -> eyre::Result<()> {

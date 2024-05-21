@@ -293,7 +293,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "envup"
+name = "envyup"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",

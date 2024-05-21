@@ -8,10 +8,9 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use clap::Parser;
-use eyre::ContextCompat;
 
 const EXTENSION: &str = "cryptenv";
-const VERSION: &str = "envup-1-0";
+const VERSION_PREFIX: &str = "[envyup-1-0]";
 
 #[derive(Debug, Parser)]
 struct Options {
@@ -35,8 +34,8 @@ fn is_encrypted(path: &Path) -> bool {
 fn decrypt(path: &Path, key: &str) -> Result<String, EnvupError> {
     let s = std::fs::read_to_string(path)?;
 
-    let Some(s) = s.strip_prefix(VERSION) else {
-        panic!("File was not enccrypted using {VERSION}");
+    let Some(s) = s.strip_prefix(VERSION_PREFIX) else {
+        panic!("File was not enccrypted using {VERSION_PREFIX}");
     };
 
     let Ok(ciphertext) = B64.decode(s) else {
@@ -54,30 +53,33 @@ fn encrypt(path: &Path, key: &str) -> Result<String, EnvupError> {
 
     let ciphertext = crypto::encrypt(s.as_bytes(), key)?;
     let b64 = B64.encode(ciphertext);
-    let mut output = String::with_capacity(b64.len() + VERSION.len());
+    let mut output = String::with_capacity(b64.len() + VERSION_PREFIX.len());
 
-    output.push_str(&VERSION);
+    output.push_str(&VERSION_PREFIX);
     output.push_str(&b64);
 
     Ok(output)
 }
 
-fn parse_env(s: &str) -> Result<HashMap<String, String>, eyre::Error> {
+fn parse_env(s: &str) -> Result<HashMap<String, String>, EnvupError> {
     s.lines()
+        .filter(|l| !l.trim().is_empty())
         .map(|l| {
             l.split_once('=')
-                .context("wrong format, expected =")
+                .ok_or_else(|| {
+                    EnvupError::InvalidFormat(format!("wrong format, expected `=` in line `{l}`"))
+                })
                 .map(|t| (t.0.trim().to_owned(), t.1.trim().to_owned()))
         })
         .collect()
 }
 
-fn en(opts: Options, password: String) -> eyre::Result<()> {
+fn en(opts: Options, password: String) -> Result<(), EnvupError> {
     let content = encrypt(&opts.path, &password)?;
     if opts.print {
         println!("{content}");
     }
-    if !opts.dry_run {
+    if opts.dry_run {
         return Ok(());
     }
 
@@ -87,7 +89,7 @@ fn en(opts: Options, password: String) -> eyre::Result<()> {
     Ok(())
 }
 
-fn de(opts: Options, password: String) -> eyre::Result<()> {
+fn de(opts: Options, password: String) -> Result<(), EnvupError> {
     let content = decrypt(&opts.path, &password)?;
     if opts.print {
         println!("{content}");
@@ -95,7 +97,7 @@ fn de(opts: Options, password: String) -> eyre::Result<()> {
     if opts.dry_run {
         return Ok(());
     }
-    
+
     let map = parse_env(&content)?;
 
     let shell = std::env::var("SHELL").expect("No SHELL variable in environment!");
@@ -115,15 +117,20 @@ fn main() -> eyre::Result<()> {
 
     println!("password: ");
     let password = rpassword::read_password().unwrap();
-    if is_encrypted(&opts.path) {
-        de(opts, password)?;
+    let result = if is_encrypted(&opts.path) {
+        de(opts, password)
     } else {
         println!("confirm password to encrypt `{}`", opts.path.display());
         if rpassword::read_password().unwrap() != password {
             eprintln!("password mismatch!");
             std::process::exit(33);
         }
-        en(opts, password)?;
+        en(opts, password)
+    };
+
+    if let Err(e) = result {
+        println!("ERROR: {e}");
+        std::process::exit(1);
     }
 
     Ok(())
@@ -170,7 +177,9 @@ mod crypto {
         let nonce: [u8; 12] = nonce.try_into().unwrap();
 
         let cipher = Aes256Gcm::new(crypt_key.as_ref().try_into().unwrap());
-        let plaintext = cipher.decrypt(&nonce.try_into().unwrap(), ciphertext)?;
+        let plaintext = cipher
+            .decrypt(&nonce.try_into().unwrap(), ciphertext)
+            .map_err(|_| EnvupError::InvalidKey)?;
 
         Ok(plaintext)
     }
@@ -182,7 +191,9 @@ pub enum EnvupError {
     IO(#[from] std::io::Error),
     #[error("Invalid key")]
     InvalidKey,
-    #[error("Cryptography error: {0}")]
+    #[error("Invalid format: {0}")]
+    InvalidFormat(String),
+    #[error("Cryptography error: AEAD Error")]
     CryptoAes(aes_gcm::Error),
     #[error("Cryptography error: {0}")]
     CryptoArgon2(argon2::Error),
